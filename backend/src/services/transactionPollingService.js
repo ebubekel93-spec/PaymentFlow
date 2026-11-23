@@ -8,7 +8,8 @@ const { server } = require('../config/stellarConfig');
 const { extractValidPayment, detectMemoCollision, detectCrossSchoolMemoCollision, detectAbnormalPatterns, determineConfirmationState } = require('./stellarService');
 const { CONFIRMATION_STATES, isConfirmedOrAbove } = require('./paymentConfirmationStateMachine');
 const { validatePaymentAmount } = require('../utils/paymentLimits');
-const { compareAmounts, toStroops, stroopsToNumber, normalizeToNumber } = require('../utils/stellarAmount');
+const { Stroops, paymentAmountDecimal } = require('../utils/stroops');
+const { asStroops, classifyFeePayment, decimalFromMongo } = require('../utils/money');
 const { generateReferenceCode } = require('../utils/generateReferenceCode');
 const { emit: sseEmit } = require('./sseService');
 const lock = require('./distributedLock');
@@ -110,10 +111,11 @@ async function processTransaction(tx, school, fencingToken) {
 
   const { payOp, memo, asset } = valid;
   // Exact stroop-based normalization (#842) — never parseFloat a monetary value.
-  const paymentAmount = normalizeToNumber(payOp.amount);
+  const exactAmount = Stroops.fromXLM(payOp.amount);
+  const paymentAmount = exactAmount.toNumber();
 
   // Validate payment amount is within configured limits
-  const limitValidation = await validatePaymentAmount(paymentAmount, {
+  const limitValidation = await validatePaymentAmount(exactAmount.toXLM(), {
     schoolId,
     asset: asset?.code,
   });
@@ -184,26 +186,13 @@ async function processTransaction(tx, school, fencingToken) {
   // Calculate cumulative totals
   const previousPayments = await Payment.aggregate([
     { $match: { schoolId, studentId: memo, confirmationStatus: 'confirmed', isSuspicious: false, deletedAt: null } },
-    { $group: { _id: null, total: { $sum: '$amount' } } },
+    { $group: { _id: null, total: { $sum: paymentAmountDecimal } } },
   ]);
-  const previousTotal = previousPayments.length ? previousPayments[0].total : 0;
-  // Sum/diff in exact stroop space (#842) so an exact cumulative match is never
-  // mis-flagged as underpaid/overpaid by a float rounding epsilon.
-  const cumulativeTotal = stroopsToNumber(toStroops(previousTotal) + toStroops(paymentAmount));
-  const remaining = stroopsToNumber(toStroops(student.feeAmount) - toStroops(cumulativeTotal));
-
-  const cumulativeVsFee = compareAmounts(cumulativeTotal, student.feeAmount);
-  let cumulativeStatus;
-  if (cumulativeVsFee < 0) cumulativeStatus = 'underpaid';
-  else if (cumulativeVsFee > 0) cumulativeStatus = 'overpaid';
-  else cumulativeStatus = 'valid';
-
-  const excessAmount = cumulativeStatus === 'overpaid'
-    ? stroopsToNumber(toStroops(cumulativeTotal) - toStroops(student.feeAmount))
-    : 0;
-
-  // Extract network fee
-  const networkFee = parseFloat(tx.fee_paid || '0') / 10000000;
+  const previousTotal = asStroops(decimalFromMongo(previousPayments[0]?.total));
+  const balance = classifyFeePayment(previousTotal.add(exactAmount), student.feeAmount);
+  const { cumulativeTotal, excessAmount, remainingBalance } = balance;
+  const cumulativeStatus = balance.status === 'partial' ? 'underpaid' : balance.status;
+  const networkFee = new Stroops(BigInt(tx.fee_paid || '0')).toNumber();
 
   // Record payment
   const paymentData = {
@@ -213,6 +202,7 @@ async function processTransaction(tx, school, fencingToken) {
     transactionHash: tx.hash,
     correlationId,
     amount: paymentAmount,
+    amountStroops: exactAmount.value.toString(),
     feeAmount: student.feeAmount,
     feeValidationStatus: cumulativeStatus,
     excessAmount,
@@ -245,8 +235,8 @@ async function processTransaction(tx, school, fencingToken) {
           { schoolId, studentId: memo },
           {
             totalPaid: cumulativeTotal,
-            remainingBalance: Math.max(0, remaining),
-            feePaid: cumulativeTotal >= student.feeAmount,
+            remainingBalance,
+            feePaid: balance.feePaid,
           },
           { session }
         );

@@ -11,6 +11,7 @@
 const Student = require('../models/studentModel');
 const Payment = require('../models/paymentModel');
 const { toMoney, decimalFromMongo, classifyFeePayment } = require('./money');
+const { paymentAmountDecimal } = require('./stroops');
 
 /**
  * Update a student's balance fields (totalPaid, remainingBalance, feePaid) after
@@ -46,7 +47,7 @@ async function updateStudentBalance(schoolId, studentId, options = {}) {
         isSuspicious: false,
       },
     },
-    { $group: { _id: null, total: { $sum: { $toDecimal: '$amount' } } } },
+    { $group: { _id: null, total: { $sum: paymentAmountDecimal } } },
   ]).session(session);
 
   const paymentTotal = paymentAgg.length ? decimalFromMongo(paymentAgg[0].total) : toMoney(0);
@@ -84,7 +85,7 @@ async function updateStudentBalance(schoolId, studentId, options = {}) {
             isSuspicious: false,
           },
         },
-        { $group: { _id: null, total: { $sum: { $toDecimal: '$amount' } } } },
+        { $group: { _id: null, total: { $sum: paymentAmountDecimal } } },
       ]).session(session);
 
       const categoryTotalDecimal = categoryPayments.length

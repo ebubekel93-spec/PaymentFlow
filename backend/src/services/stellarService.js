@@ -1,6 +1,5 @@
 "use strict";
 
-const { Operation } = require("@stellar/stellar-sdk");
 const {
   server,
   isAcceptedAsset,
@@ -12,7 +11,8 @@ const Payment = require("../models/paymentModel");
 const Student = require("../models/studentModel");
 const PaymentIntent = require("../models/paymentIntentModel");
 const { validatePaymentAmount } = require("../utils/paymentLimits");
-const { toStroops, stroopsToNumber, compareAmounts } = require("../utils/stellarAmount");
+const { Stroops, paymentAmountDecimal } = require("../utils/stroops");
+const { asStroops, classifyFeePayment, decimalFromMongo } = require("../utils/money");
 const {
   SUPPORTED_MEMO_TYPES,
   normalizeMemoType,
@@ -51,22 +51,9 @@ function detectAsset(payOp) {
   return { assetCode, assetType, assetIssuer };
 }
 
-/**
- * Normalize a Horizon API amount string to a JS number using the Stellar SDK
- * as the canonical source of truth for 7-decimal-place precision.
- *
- * Horizon returns amounts as decimal strings (e.g. '100.0000000'). Both XLM
- * and USDC use 7 decimal places on Stellar, so the same conversion applies to
- * all accepted assets. We round-trip through stroops via Operation._fromXDRAmount
- * to guarantee the SDK's precision rules are applied consistently.
- *
- * @param {string} rawAmount - Decimal amount string from Horizon API
- * @returns {number}
- */
+/** Convert a Horizon decimal for legacy numeric fields. */
 function normalizeAmount(rawAmount) {
-  // Convert Horizon decimal string → stroop integer → SDK-normalized decimal
-  const stroops = String(Math.round(parseFloat(rawAmount) * 1e7));
-  return parseFloat(Operation._fromXDRAmount(stroops));
+  return Stroops.fromXLM(rawAmount).toNumber();
 }
 
 /**
@@ -140,18 +127,18 @@ function validatePaymentAgainstFee(paymentAmount, expectedFee) {
   // Compare in exact integer stroop space (#842). Float comparison of the paid
   // amount vs the fee can mis-judge an exact-match payment as short/over by a
   // rounding epsilon; stroop comparison is exact.
-  const paidStroops = toStroops(paymentAmount);
-  const feeStroops = toStroops(expectedFee);
+  const paidStroops = asStroops(paymentAmount);
+  const feeStroops = asStroops(expectedFee);
 
-  if (paidStroops < feeStroops) {
+  if (paidStroops.compare(feeStroops) < 0) {
     return {
       status: "underpaid",
       excessAmount: 0,
       message: `Payment of ${paymentAmount} is less than the required fee of ${expectedFee}`,
     };
   }
-  if (paidStroops > feeStroops) {
-    const excess = stroopsToNumber(paidStroops - feeStroops);
+  if (paidStroops.compare(feeStroops) > 0) {
+    const excess = paidStroops.subtract(feeStroops).toNumber();
     return {
       status: "overpaid",
       excessAmount: excess,
@@ -589,10 +576,11 @@ async function verifyTransaction(txHash, walletAddress, schoolId = null) {
     throw err;
   }
 
-  const amount = normalizeAmount(payOp.amount);
+  const exactAmount = Stroops.fromXLM(payOp.amount);
+  const amount = exactAmount.toNumber();
 
   // 5. Validate payment amount is within configured limits
-  const limitValidation = await validatePaymentAmount(amount, {
+  const limitValidation = await validatePaymentAmount(exactAmount.toXLM(), {
     schoolId,
     asset: asset?.code,
   });
@@ -610,7 +598,7 @@ async function verifyTransaction(txHash, walletAddress, schoolId = null) {
 
   const feeValidation =
     feeAmount != null
-      ? validatePaymentAgainstFee(amount, feeAmount)
+      ? validatePaymentAgainstFee(exactAmount, feeAmount)
       : {
         status: "unknown",
         excessAmount: 0,
@@ -618,13 +606,14 @@ async function verifyTransaction(txHash, walletAddress, schoolId = null) {
       };
 
   // Extract network fee from transaction
-  const networkFee = parseFloat(tx.fee_paid || "0") / 10000000; // Convert stroops to XLM
+  const networkFee = new Stroops(BigInt(tx.fee_paid || "0")).toNumber(); // Convert stroops to XLM
 
   return {
     hash: tx.hash,
     memo: memo,
     studentId: memo,
-    amount: amount,
+    amount,
+    ...exactAmount.toAmountFields(),
     assetCode: asset.assetCode,
     assetType: asset.assetType,
     feeAmount,
@@ -760,9 +749,10 @@ async function syncPaymentsForSchool(school) {
 
       summary.matched++;
 
-      const paymentAmount = parseFloat(payOp.amount);
+      const exactAmount = Stroops.fromXLM(payOp.amount);
+      const paymentAmount = exactAmount.toNumber();
 
-      const limitValidation = await validatePaymentAmount(paymentAmount, {
+      const limitValidation = await validatePaymentAmount(exactAmount.toXLM(), {
         schoolId,
         asset: asset?.code,
       });
@@ -825,29 +815,11 @@ async function syncPaymentsForSchool(school) {
 
       const previousPayments = await Payment.aggregate([
         { $match: { schoolId, studentId, deletedAt: null } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
+        { $group: { _id: null, total: { $sum: paymentAmountDecimal } } },
       ]);
-      const previousTotal = previousPayments.length
-        ? previousPayments[0].total
-        : 0;
-      const cumulativeTotal = parseFloat(
-        (previousTotal + paymentAmount).toFixed(7),
-      );
-
-      // Partial payments are accepted in the sync path — cumulative total determines status.
-      // A single payment below the fee is recorded as 'partial' (credit toward remainingBalance).
-      // Compare in exact stroop space (#842) so an exact cumulative match is never
-      // mis-classified as partial/overpaid by a float rounding epsilon.
-      const cumulativeVsFee = compareAmounts(cumulativeTotal, student.feeAmount);
-      let cumulativeStatus;
-      if (cumulativeVsFee < 0) cumulativeStatus = "partial";
-      else if (cumulativeVsFee > 0) cumulativeStatus = "overpaid";
-      else cumulativeStatus = "valid";
-
-      const excessAmount =
-        cumulativeStatus === "overpaid"
-          ? stroopsToNumber(toStroops(cumulativeTotal) - toStroops(student.feeAmount))
-          : 0;
+      const previousTotal = asStroops(decimalFromMongo(previousPayments[0]?.total));
+      const balance = classifyFeePayment(previousTotal.add(exactAmount), student.feeAmount);
+      const { cumulativeTotal, status: cumulativeStatus, excessAmount } = balance;
 
       let session;
       try {
@@ -859,6 +831,7 @@ async function syncPaymentsForSchool(school) {
             txHash: tx.hash,
             correlationId: deriveCorrelationId(tx.hash),
             amount: paymentAmount,
+            amountStroops: exactAmount.value.toString(),
             feeAmount: feeAmountForRecord,
             feeCategory,
             feeValidationStatus: cumulativeStatus,
@@ -879,8 +852,8 @@ async function syncPaymentsForSchool(school) {
           if (isConfirmed && !isSuspicious && !studentDeleted) {
             const updateData = {
               totalPaid: cumulativeTotal,
-              remainingBalance: parseFloat(Math.max(0, student.feeAmount - cumulativeTotal).toFixed(7)),
-              feePaid: cumulativeTotal >= student.feeAmount,
+              remainingBalance: balance.remainingBalance,
+              feePaid: balance.feePaid,
             };
 
             if (feeCategory && student.fees && student.fees.length > 0) {
@@ -897,18 +870,13 @@ async function syncPaymentsForSchool(school) {
                       deletedAt: null,
                     },
                   },
-                  { $group: { _id: null, total: { $sum: "$amount" } } },
+                  { $group: { _id: null, total: { $sum: paymentAmountDecimal } } },
                 ]).session(session);
-                const categoryTotalPaid = categoryPayments.length
-                  ? parseFloat(categoryPayments[0].total.toFixed(7))
-                  : 0;
-
-                student.fees[feeIndex].totalPaid = categoryTotalPaid;
-                student.fees[feeIndex].remainingBalance = Math.max(
-                  0,
-                  student.fees[feeIndex].amount - categoryTotalPaid
-                );
-                student.fees[feeIndex].paid = categoryTotalPaid >= student.fees[feeIndex].amount;
+                const fee = student.fees[feeIndex];
+                const category = classifyFeePayment(decimalFromMongo(categoryPayments[0]?.total), fee.amount);
+                fee.totalPaid = category.cumulativeTotal;
+                fee.remainingBalance = category.remainingBalance;
+                fee.paid = category.feePaid;
                 updateData.fees = student.fees;
               }
             }
@@ -1031,14 +999,10 @@ async function finalizeConfirmedPayments(schoolId) {
           deletedAt: null,
         },
       },
-      { $group: { _id: null, total: { $sum: "$amount" } } },
+      { $group: { _id: null, total: { $sum: paymentAmountDecimal } } },
     ]);
-    const totalPaid = agg.length ? parseFloat(agg[0].total.toFixed(7)) : 0;
-    const remainingBalance = parseFloat(
-      Math.max(0, student.feeAmount - totalPaid).toFixed(7),
-    );
-
-    const updateData = { totalPaid, remainingBalance, feePaid: totalPaid >= student.feeAmount };
+    const balance = classifyFeePayment(decimalFromMongo(agg[0]?.total), student.feeAmount);
+    const updateData = { totalPaid: balance.cumulativeTotal, remainingBalance: balance.remainingBalance, feePaid: balance.feePaid };
 
     // Update fee categories if they exist
     if (student.fees && student.fees.length > 0) {
@@ -1056,22 +1020,22 @@ async function finalizeConfirmedPayments(schoolId) {
         {
           $group: {
             _id: "$feeCategory",
-            totalPaid: { $sum: "$amount" },
+            totalPaid: { $sum: paymentAmountDecimal },
           },
         },
       ]);
 
       const categoryPaymentMap = {};
       categoryPayments.forEach(cp => {
-        categoryPaymentMap[cp._id] = parseFloat(cp.totalPaid.toFixed(7));
+        categoryPaymentMap[cp._id] = decimalFromMongo(cp.totalPaid);
       });
 
       // Update each fee category
       student.fees.forEach(fee => {
-        const paid = categoryPaymentMap[fee.category] || 0;
-        fee.totalPaid = paid;
-        fee.remainingBalance = Math.max(0, fee.amount - paid);
-        fee.paid = paid >= fee.amount;
+        const category = classifyFeePayment(categoryPaymentMap[fee.category] || 0, fee.amount);
+        fee.totalPaid = category.cumulativeTotal;
+        fee.remainingBalance = category.remainingBalance;
+        fee.paid = category.feePaid;
       });
 
       updateData.fees = student.fees;
@@ -1112,6 +1076,7 @@ async function parseIncomingTransaction(txHash, walletAddress = null) {
       from: op.from || null,
       to: op.to,
       amount: normalizeAmount(op.amount),
+      ...Stroops.fromXLM(op.amount).toAmountFields(),
       assetCode: op.asset_type === "native" ? "XLM" : op.asset_code,
       assetType: op.asset_type,
       assetIssuer: op.asset_issuer || null,

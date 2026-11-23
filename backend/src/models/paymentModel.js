@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { Stroops } = require('../utils/stroops');
 const softDelete = require('../utils/softDelete');
 const tenantScope = require('../plugins/tenantScope');
 const {
@@ -28,6 +29,7 @@ const paymentSchema = new mongoose.Schema(
 
     // unique: false here — uniqueness is enforced by the compound index { schoolId, txHash } below
     txHash: { type: String, required: true, index: true },
+    amountStroops: { type: String, match: /^\d+$/ },
     amount: {
       type: Number,
       required: true,
@@ -175,7 +177,13 @@ const paymentSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-    toJSON: { virtuals: true },
+    toJSON: {
+      virtuals: true,
+      transform(_document, payment) {
+        if (payment.amount != null) Object.assign(payment, Stroops.fromPayment(payment).toAmountFields());
+        return payment;
+      },
+    },
     toObject: { virtuals: true },
   },
 );
@@ -293,11 +301,12 @@ paymentSchema.pre('save', async function () {
   // canonical precision) so aggregates never accumulate floating-point drift.
   // Also rejects any non-finite value that somehow slipped past the validator
   // (e.g. values written directly via update operators bypass Mongoose validators).
-  const STELLAR_DECIMALS = 7;
-  const normalize = (v) => (v != null && Number.isFinite(v) ? parseFloat(v.toFixed(STELLAR_DECIMALS)) : v);
+  const normalize = (v) => Number.isFinite(v) ? Stroops.fromXLM(v).toNumber() : v;
 
   if (this.isModified('amount') && this.amount != null) {
-    this.amount = normalize(this.amount);
+    const exact = this.isModified('amountStroops') ? Stroops.fromPayment(this) : Stroops.fromXLM(this.amount);
+    this.amountStroops = exact.value.toString();
+    this.amount = exact.toNumber();
   }
   if (this.isModified('feeAmount') && this.feeAmount != null) {
     this.feeAmount = normalize(this.feeAmount);

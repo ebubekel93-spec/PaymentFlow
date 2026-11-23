@@ -30,7 +30,8 @@ const { withStellarRetry } = require('../utils/withStellarRetry');
 const { makePaymentAuditLogger } = require('../utils/paymentAuditLogger');
 const lock = require('../services/distributedLock');
 const logger = require('../utils/logger');
-const { toMoney, decimalFromMongo, classifyFeePayment } = require('../utils/money');
+const { asStroops, decimalFromMongo, classifyFeePayment } = require('../utils/money');
+const { Stroops, paymentAmountDecimal } = require('../utils/stroops');
 
 // TTL for the per-school distributed verify lock.  Verify is a fast Horizon
 // round-trip; 30 s is more than enough while still auto-expiring on crash.
@@ -355,6 +356,7 @@ async function verifyPayment(req, res, next) {
         memo: existing.memo,
         studentId: existing.studentId,
         amount: existing.amount,
+        ...Stroops.fromPayment(existing).toAmountFields(),
         assetCode: existing.assetCode,
         assetType: existing.assetType,
         feeAmount: existing.feeAmount,
@@ -460,10 +462,10 @@ async function verifyPayment(req, res, next) {
         // misclassified by a float epsilon.
         const prevAgg = await Payment.aggregate([
           { $match: { schoolId, studentId: studentStrId, deletedAt: null, status: 'SUCCESS' } },
-          { $group: { _id: null, total: { $sum: { $toDecimal: '$amount' } } } },
+          { $group: { _id: null, total: { $sum: paymentAmountDecimal } } },
         ]);
-        const prevTotal = prevAgg.length ? decimalFromMongo(prevAgg[0].total) : toMoney(0);
-        const classification = classifyFeePayment(prevTotal.plus(toMoney(result.amount)), studentObj.feeAmount);
+        const prevTotal = asStroops(decimalFromMongo(prevAgg[0]?.total));
+        const classification = classifyFeePayment(prevTotal.add(Stroops.fromPayment(result)), studentObj.feeAmount);
         cumulativeTotal = classification.cumulativeTotal;
         feeValidationStatus = classification.status;
         computedExcessAmount = classification.excessAmount;
@@ -485,6 +487,7 @@ async function verifyPayment(req, res, next) {
             studentId: studentStrId,
             txHash: result.hash,
             amount: result.amount,
+            amountStroops: Stroops.fromPayment(result).value.toString(),
             feeAmount: result.feeAmount || studentObj.feeAmount,
             feeValidationStatus,
             excessAmount: computedExcessAmount,
@@ -511,6 +514,7 @@ async function verifyPayment(req, res, next) {
                 verified: true, cached: true, hash: cached.txHash,
                 stellarExplorerUrl: getExplorerUrl(cached.txHash), explorerUrl: getExplorerUrl(cached.txHash),
                 memo: cached.memo, studentId: cached.studentId, amount: cached.amount,
+                ...Stroops.fromPayment(cached).toAmountFields(),
                 assetCode: cached.assetCode, feeAmount: cached.feeAmount,
                 feeValidation: { status: cached.feeValidationStatus, excessAmount: cached.excessAmount },
                 date: cached.confirmedAt || cached.createdAt, status: cached.status,
@@ -538,6 +542,7 @@ async function verifyPayment(req, res, next) {
         txHash: normalizedHash,
         studentId: studentStrId,
         amount: result.amount,
+        ...Stroops.fromPayment(result).toAmountFields(),
         assetCode: result.assetCode || 'XLM',
         feeValidationStatus,
         duration: `${Date.now() - startTime}ms`,
@@ -550,6 +555,7 @@ async function verifyPayment(req, res, next) {
         studentId: studentStrId,
         schoolId,
         amount: result.amount,
+        ...Stroops.fromPayment(result).toAmountFields(),
         assetCode: result.assetCode || 'XLM',
         feeAmount: result.feeAmount || studentObj.feeAmount,
         feeValidationStatus,
@@ -587,6 +593,7 @@ async function verifyPayment(req, res, next) {
         memo: result.memo,
         studentId: studentStrId,
         amount: result.amount,
+        ...Stroops.fromPayment(result).toAmountFields(),
         assetCode: result.assetCode,
         assetType: result.assetType,
         feeAmount: result.feeAmount || studentObj.feeAmount,

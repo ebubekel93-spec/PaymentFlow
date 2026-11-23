@@ -1,6 +1,7 @@
 "use strict";
 
 const Payment = require("../models/paymentModel");
+const { Stroops } = require("../utils/stroops");
 const Outbox = require("../models/outboxModel");
 const { generateReferenceCode } = require("../utils/generateReferenceCode");
 const logger = require("../utils/logger").child("TransactionService");
@@ -31,6 +32,7 @@ const FINANCIAL_WRITE_CONCERN = { w: 'majority', wtimeout: 5000 };
  */
 async function savePayment(data, options = {}) {
   const { session = null } = options;
+  if (data.amount != null) data = { ...data, amountStroops: Stroops.fromPayment(data).value.toString() };
 
   if (!data.referenceCode) {
     data = { ...data, referenceCode: await generateReferenceCode() };

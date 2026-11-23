@@ -26,6 +26,22 @@ module.exports = [
     },
   },
   {
+    files: [
+      'src/controllers/payment*.js',
+      'src/models/payment*.js',
+      'src/services/stellarService.js',
+      'src/services/transactionPollingService.js',
+      'src/services/transactionService.js',
+      'src/utils/{money,stellarAmount,stroops,studentBalanceUpdater}.js',
+    ],
+    rules: {
+      'no-restricted-syntax': ['error', {
+        selector: "CallExpression[callee.name='parseFloat'], CallExpression[callee.property.name='parseFloat']",
+        message: 'Use stroop or decimal arithmetic for payment amounts.',
+      }],
+    },
+  },
+  {
     files: ['src/utils/logger.js'],
     rules: {
       'no-console': 'off',

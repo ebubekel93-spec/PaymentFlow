@@ -1,5 +1,8 @@
 'use strict';
 
+const { Stroops, paymentAmountDecimal } = require('../utils/stroops');
+const { classifyFeePayment, decimalFromMongo, toMoneyNumber } = require('../utils/money');
+
 /**
  * paymentQueryController — read-only payment queries, all school-scoped.
  */
@@ -79,7 +82,7 @@ async function getStudentPayments(req, res, next) {
         const hash = p.transactionHash || p.txHash;
         const explorerUrl = hash ? `https://stellar.expert/explorer/${network}/tx/${hash}` : null;
         const converted = await enrichPaymentWithConversion(p, targetCurrency);
-        return { ...converted, explorerUrl };
+        return { ...converted, ...Stroops.fromPayment(p).toAmountFields(), explorerUrl };
       }),
     );
 
@@ -182,6 +185,7 @@ async function getAllPayments(req, res, next) {
 
     const enrichedPayments = payments.map((p) => ({
       ...p,
+      ...Stroops.fromPayment(p).toAmountFields(),
       stellarExplorerUrl: getExplorerUrl(p.transactionHash || p.txHash),
       explorerUrl: getExplorerUrl(p.transactionHash || p.txHash),
     }));
@@ -233,16 +237,13 @@ async function getStudentBalance(req, res, next) {
     const [result, deletedCount] = await Promise.all([
       Payment.aggregate([
         { $match: { schoolId, studentId, deletedAt: null } },
-        { $group: { _id: null, totalPaid: { $sum: '$amount' }, count: { $sum: 1 } } },
+        { $group: { _id: null, totalPaid: { $sum: paymentAmountDecimal }, count: { $sum: 1 } } },
       ]),
       Payment.countDocuments({ schoolId, studentId, deletedAt: { $ne: null } }),
     ]);
 
-    const totalPaid = result.length ? parseFloat(result[0].totalPaid.toFixed(7)) : 0;
-    const remainingBalance = parseFloat(Math.max(0, student.feeAmount - totalPaid).toFixed(7));
-    const excessAmount = totalPaid > student.feeAmount
-      ? parseFloat((totalPaid - student.feeAmount).toFixed(7))
-      : 0;
+    const balance = classifyFeePayment(decimalFromMongo(result[0]?.totalPaid), student.feeAmount);
+    const { cumulativeTotal: totalPaid, remainingBalance, excessAmount } = balance;
 
     const targetCurrency = req.school.localCurrency || 'USD';
     const [feeConv, paidConv, remainingConv] = await Promise.all([
@@ -258,20 +259,21 @@ async function getStudentBalance(req, res, next) {
     if (student.fees && student.fees.length > 0) {
       const categoryPayments = await Payment.aggregate([
         { $match: { schoolId, studentId, feeCategory: { $ne: null }, deletedAt: null } },
-        { $group: { _id: '$feeCategory', totalPaid: { $sum: '$amount' }, count: { $sum: 1 } } },
+        { $group: { _id: '$feeCategory', totalPaid: { $sum: paymentAmountDecimal }, count: { $sum: 1 } } },
       ]);
       const categoryPaymentMap = {};
       categoryPayments.forEach((cp) => {
-        categoryPaymentMap[cp._id] = { totalPaid: parseFloat(cp.totalPaid.toFixed(7)), installmentCount: cp.count };
+        categoryPaymentMap[cp._id] = { totalPaid: decimalFromMongo(cp.totalPaid), installmentCount: cp.count };
       });
       categoryBreakdown = student.fees.map((fee) => {
         const paid = categoryPaymentMap[fee.category] || { totalPaid: 0, installmentCount: 0 };
+        const category = classifyFeePayment(paid.totalPaid, fee.amount);
         return {
           category: fee.category,
           amount: fee.amount,
-          totalPaid: paid.totalPaid,
-          remainingBalance: Math.max(0, fee.amount - paid.totalPaid),
-          paid: paid.totalPaid >= fee.amount,
+          totalPaid: category.cumulativeTotal,
+          remainingBalance: category.remainingBalance,
+          paid: category.feePaid,
           installmentCount: paid.installmentCount,
           paymentDeadline: fee.paymentDeadline,
         };
@@ -425,11 +427,11 @@ async function getPaymentSummary(req, res, next) {
       ]),
       Payment.aggregate([
         { $match: { schoolId, status: 'SUCCESS', deletedAt: null, studentDeleted: { $ne: true } } },
-        { $group: { _id: null, totalXlmCollected: { $sum: '$amount' } } },
+        { $group: { _id: null, totalXlmCollected: { $sum: paymentAmountDecimal } } },
       ]),
       Payment.aggregate([
         { $match: { schoolId, status: 'SUCCESS', deletedAt: null, studentDeleted: { $ne: true }, feeCategory: { $ne: null } } },
-        { $group: { _id: '$feeCategory', totalCollected: { $sum: '$amount' }, paymentCount: { $sum: 1 } } },
+        { $group: { _id: '$feeCategory', totalCollected: { $sum: paymentAmountDecimal }, paymentCount: { $sum: 1 } } },
       ]),
     ]);
 
@@ -440,10 +442,10 @@ async function getPaymentSummary(req, res, next) {
       totalStudents: s.totalStudents,
       paidCount: s.paidCount,
       unpaidCount: s.unpaidCount,
-      totalXlmCollected: parseFloat(x.totalXlmCollected.toFixed(7)),
+      totalXlmCollected: toMoneyNumber(decimalFromMongo(x.totalXlmCollected)),
       categoryBreakdown: categoryStats.map((cat) => ({
         category: cat._id,
-        totalCollected: parseFloat(cat.totalCollected.toFixed(7)),
+        totalCollected: toMoneyNumber(decimalFromMongo(cat.totalCollected)),
         paymentCount: cat.paymentCount,
       })),
     });

@@ -70,14 +70,13 @@ function fromStroops(stroops) {
 }
 
 /**
- * Convert integer stroops to a JS number (7-decimal precision). Safe for the
- * full Stellar range when used for display/storage; comparisons should prefer
- * compareAmounts so they stay in exact stroop space.
+ * Convert integer stroops to a JS number for legacy output fields. Large
+ * values can lose precision, so use fromStroops for exact serialization.
  * @param {bigint|number|string} stroops
  * @returns {number}
  */
 function stroopsToNumber(stroops) {
-  return parseFloat(fromStroops(stroops));
+  return Number(fromStroops(stroops));
 }
 
 /**

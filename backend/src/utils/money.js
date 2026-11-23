@@ -29,7 +29,7 @@
  */
 
 const Decimal = require('decimal.js');
-const { toStroops } = require('./decimalPrecision');
+const { Stroops } = require('./stroops');
 
 // XLM and USDC both carry exactly 7 decimal places on Stellar.
 const MONEY_DECIMALS = 7;
@@ -64,9 +64,12 @@ function toMoneyNumber(value) {
 
 /** -1 / 0 / 1, exact — never affected by float epsilon. */
 function compareMoney(a, b) {
-  const unitsA = BigInt(toStroops(roundMoney(a).toFixed(MONEY_DECIMALS)));
-  const unitsB = BigInt(toStroops(roundMoney(b).toFixed(MONEY_DECIMALS)));
-  return unitsA < unitsB ? -1 : unitsA > unitsB ? 1 : 0;
+  return asStroops(a).compare(asStroops(b));
+}
+
+function asStroops(value) {
+  if (value instanceof Stroops) return value;
+  return Stroops.fromXLM(roundMoney(value).toFixed(MONEY_DECIMALS));
 }
 
 function moneyEquals(a, b) {
@@ -83,13 +86,10 @@ function moneyEquals(a, b) {
  * @param {Decimal|number|string} feeAmount - the fee owed
  */
 function classifyFeePayment(cumulativeTotal, feeAmount) {
-  const cumulative = roundMoney(cumulativeTotal);
-  const fee = roundMoney(feeAmount);
-  const cumulativeUnits = BigInt(toStroops(cumulative.toFixed(MONEY_DECIMALS)));
-  const feeUnits = BigInt(toStroops(fee.toFixed(MONEY_DECIMALS)));
-  const cmp = cumulativeUnits < feeUnits ? -1 : cumulativeUnits > feeUnits ? 1 : 0;
-  const cumulativeExact = new Decimal(cumulativeUnits.toString()).div(10 ** MONEY_DECIMALS);
-  const feeExact = new Decimal(feeUnits.toString()).div(10 ** MONEY_DECIMALS);
+  const cumulative = asStroops(cumulativeTotal);
+  const fee = asStroops(feeAmount);
+  const delta = cumulative.subtract(fee);
+  const cmp = cumulative.compare(fee);
 
   let status;
   if (cmp < 0) status = 'partial';
@@ -99,9 +99,9 @@ function classifyFeePayment(cumulativeTotal, feeAmount) {
   return {
     status,
     feePaid: cmp >= 0,
-    cumulativeTotal: toMoneyNumber(cumulativeExact),
-    excessAmount: status === 'overpaid' ? toMoneyNumber(cumulativeExact.minus(feeExact)) : 0,
-    remainingBalance: toMoneyNumber(Decimal.max(0, feeExact.minus(cumulativeExact))),
+    cumulativeTotal: cumulative.toNumber(),
+    excessAmount: status === 'overpaid' ? delta.toNumber() : 0,
+    remainingBalance: cmp < 0 ? fee.subtract(cumulative).toNumber() : 0,
   };
 }
 
@@ -112,6 +112,7 @@ module.exports = {
   decimalFromMongo,
   roundMoney,
   toMoneyNumber,
+  asStroops,
   compareMoney,
   moneyEquals,
   classifyFeePayment,
