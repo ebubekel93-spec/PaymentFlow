@@ -6,7 +6,7 @@ const FeeStructure = require('../models/feeStructureModel');
 const { POOL_CONFIG } = require('../config/database');
 
 function localDateStartUtc(dateString, timezone) {
-  const [year, month, day] = dateString.split('-').map(Number);
+  const [year, month, day] = dateString.slice(0, 10).split('-').map(Number);
   const target = Date.UTC(year, month - 1, day);
   let candidate = target;
   const formatter = new Intl.DateTimeFormat('en-CA', {
@@ -32,7 +32,7 @@ function localDateStartUtc(dateString, timezone) {
 }
 
 function nextDateString(dateString) {
-  const date = new Date(`${dateString}T00:00:00.000Z`);
+  const date = new Date(`${dateString.slice(0, 10)}T00:00:00.000Z`);
   date.setUTCDate(date.getUTCDate() + 1);
   return date.toISOString().slice(0, 10);
 }
@@ -138,8 +138,8 @@ async function generateReport({ schoolId, startDate, endDate, timezone = 'UTC' }
   const match = { schoolId, status: 'SUCCESS', studentDeleted: { $ne: true }, deletedAt: null };
   if (startDate || endDate) {
     match.confirmedAt = {};
-    if (startDate) match.confirmedAt.$gte = new Date(startDate + 'T00:00:00.000Z');
-    if (endDate)   match.confirmedAt.$lte = new Date(endDate   + 'T23:59:59.999Z');
+    if (startDate) match.confirmedAt.$gte = localDateStartUtc(startDate, timezone);
+    if (endDate)   match.confirmedAt.$lt = localDateStartUtc(nextDateString(endDate), timezone);
   }
 
   const paidStudentIds = await Payment.distinct('studentId', match);
@@ -170,8 +170,8 @@ async function generateReport({ schoolId, startDate, endDate, timezone = 'UTC' }
           {
             $match: startDate || endDate ? {
               confirmedAt: {
-                ...(startDate ? { $gte: new Date(startDate + 'T00:00:00.000Z') } : {}),
-                ...(endDate ? { $lte: new Date(endDate + 'T23:59:59.999Z') } : {}),
+                ...(startDate ? { $gte: localDateStartUtc(startDate, timezone) } : {}),
+                ...(endDate ? { $lt: localDateStartUtc(nextDateString(endDate), timezone) } : {}),
               },
             } : {},
           },
@@ -204,14 +204,13 @@ async function generateReport({ schoolId, startDate, endDate, timezone = 'UTC' }
   // Calculate dateRangeDays to indicate actual range returned
   let dateRangeDays = null;
   if (startDate && endDate) {
-    const start = new Date(startDate + 'T00:00:00.000Z');
-    const end = new Date(endDate + 'T23:59:59.999Z');
-    dateRangeDays = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+    dateRangeDays = (Date.parse(endDate.slice(0, 10)) - Date.parse(startDate.slice(0, 10))) / 86400000 + 1;
   }
 
   return {
     generatedAt: new Date().toISOString(),
     schoolId,
+    timezone,
     period: { startDate: startDate || null, endDate: endDate || null },
     dateRangeDays,
     summary: { ...totals, fullyPaidStudentCount: fullyPaidCount },
@@ -267,7 +266,7 @@ function reportToCsv(report) {
   lines.push(`Fully Paid Students,${csvEscape(report.summary.fullyPaidStudentCount)}`);
   lines.push('');
   lines.push('--- Daily Breakdown ---');
-  lines.push('Date,Total Amount,Payment Count,Valid,Overpaid,Underpaid,Unique Students');
+  lines.push(`Date (${report.timezone || 'UTC'}),Total Amount,Payment Count,Valid,Overpaid,Underpaid,Unique Students`);
   for (const row of report.byDate) {
     lines.push([
       csvEscape(row.date),

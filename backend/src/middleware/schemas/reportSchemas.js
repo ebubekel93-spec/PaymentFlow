@@ -14,6 +14,14 @@ const reportQuerySchema = Joi.object({
   endDate:        Joi.string().isoDate().optional(),
   format:         Joi.string().valid('json', 'csv', 'accounting_csv').default('json'),
   schema_version: Joi.number().integer().min(1).max(1).default(1),
+  timezone:       Joi.string().pattern(/^[A-Za-z][A-Za-z0-9_+\/-]*$/).custom((value, helpers) => {
+    try {
+      new Intl.DateTimeFormat('en', { timeZone: value });
+      return value;
+    } catch {
+      return helpers.error('any.invalid', { message: 'timezone must be a valid IANA timezone' });
+    }
+  }),
   async:          Joi.boolean().optional(),
 }).custom((value, helpers) => {
   const { startDate, endDate } = value;
