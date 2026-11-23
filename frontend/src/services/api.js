@@ -109,7 +109,11 @@ export const getStudents = (page = 1, limit = 20, { search, status, className } 
   });
 export const getStudent = (studentId, { signal } = {}) => api.get(`/students/${studentId}`, { signal });
 export const registerStudent = (data) => api.post("/students", data);
-export const updateStudent = (studentId, data) => api.patch(`/students/${studentId}`, data);
+const versionHeaders = (version) => ({
+  headers: { 'If-Match': typeof version === 'string' ? version : `"${version ?? 0}"` },
+});
+export const updateStudent = (studentId, data, version) =>
+  api.put(`/students/${studentId}`, data, versionHeaders(version));
 // Payment endpoints — also available as a typed client via ./paymentApiClient
 export const getPaymentSummary = ({ signal } = {}) => api.get("/payments/summary", { signal });
 export const getPaymentInstructions = (studentId, { signal } = {}) => api.get(`/payments/instructions/${studentId}`, { signal });
@@ -170,7 +174,10 @@ export const deleteFeeAdjustmentRule = (id, schoolId) =>
 
 // School settings
 export const getSchool = (slug) => api.get(`/schools/${slug}`);
-export const updateSchool = (slug, data) => api.patch(`/schools/${slug}`, data);
+export const updateSchool = (slug, data, version) =>
+  api.patch(`/schools/${slug}`, data, versionHeaders(version));
+export const updateFeeStructure = (className, data, version) =>
+  api.put(`/fees/${encodeURIComponent(className)}`, data, versionHeaders(version));
 
 // Payment plans
 export const createPaymentPlan = (studentId, data) =>

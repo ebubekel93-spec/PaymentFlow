@@ -111,8 +111,8 @@ app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-School-ID', 'Idempotency-Key', 'X-Correlation-ID'],
-  exposedHeaders: ['X-Correlation-ID'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-School-ID', 'Idempotency-Key', 'X-Correlation-ID', 'If-Match'],
+  exposedHeaders: ['X-Correlation-ID', 'ETag'],
   credentials: true,
 }));
 app.use(cookieParser());

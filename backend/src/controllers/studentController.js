@@ -1,5 +1,7 @@
 'use strict';
 
+const { withVersion, versionFilter, staleOrMissing } = require('../middleware/optimisticLock');
+
 const Student = require('../models/studentModel');
 const FeeStructure = require('../models/feeStructureModel');
 const { get, set, del, KEYS, TTL } = require('../cache');
@@ -449,11 +451,14 @@ async function updateStudent(req, res, next) {
     if (reminderOptOut !== undefined) update.reminderOptOut = Boolean(reminderOptOut);
     if (graduatedAt !== undefined) update.graduatedAt = graduatedAt;
 
+    const target = { schoolId: req.schoolId, studentId };
     const student = await Student.findOneAndUpdate(
-      { schoolId: req.schoolId, studentId },
-      update,
+      { ...target, ...versionFilter(req.expectedVersion) },
+      { $set: update, $inc: { __v: 1 } },
       { new: true, runValidators: true },
     );
+
+    if (!student) return staleOrMissing(res, next, Student.findOne(target));
 
     del(KEYS.student(studentId));
 
@@ -475,7 +480,7 @@ async function updateStudent(req, res, next) {
       });
     }
 
-    res.json(student);
+    withVersion(res, student).json(student);
   } catch (err) {
     if (err.name === 'ValidationError') {
       return res.status(400).json({ error: err.message, code: 'VALIDATION_ERROR' });
@@ -487,10 +492,6 @@ async function updateStudent(req, res, next) {
 async function getStudent(req, res, next) {
   try {
     const { studentId } = req.params;
-    const cacheKey = KEYS.student(studentId);
-    const cached = get(cacheKey);
-    if (cached !== undefined) return res.json(cached);
-
     const student = await Student.findOne({ schoolId: req.schoolId, studentId });
     if (!student) {
       const err = new Error('Student not found');
@@ -498,8 +499,7 @@ async function getStudent(req, res, next) {
       return next(err);
     }
 
-    set(cacheKey, student, TTL.STUDENT);
-    res.json(student);
+    withVersion(res, student).json(student);
   } catch (err) {
     next(err);
   }
